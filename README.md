@@ -30,6 +30,12 @@ Or pass the output directory directly:
 python3 main.py --output out --verbose
 ```
 
+Pass `--quiet` to suppress all output except errors:
+
+```sh
+python3 main.py --output out --quiet
+```
+
 The script checks that `entry.png` is a 1024×1024 PNG no larger than 1 MiB, copies it to the output directory, and verifies the copy's SHA-256 digest matches the original before printing the output path, byte size, dimensions and digest. Python 3.13, standard library only — no network access.
 
 ## Verification

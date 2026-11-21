@@ -29,15 +29,17 @@ Stories on the front page (all real, reported on 20-21 November 2026):
 What this script does
 ---------------------
 It locates ``entry.png`` next to this file, checks that it really is a
-1024x1024 PNG no larger than 1 MiB, copies it byte-for-byte into the
-output directory, and then re-reads the copy to confirm the SHA-256
-digest matches the original. Nothing is downloaded, nothing is rendered
-here — the image itself is the entry.
+1024x1024 PNG no larger than 1 MiB — including validating the CRC of the
+IHDR chunk — copies it byte-for-byte into the output directory, and then
+re-reads the copy to confirm the SHA-256 digest matches the original.
+Nothing is downloaded, nothing is rendered here — the image itself is
+the entry.
 
 Usage::
 
     MAKEFUN_OUTPUT_DIR=out python3 main.py
     python3 main.py --output out --verbose
+    python3 main.py --output out --quiet
 
 Python 3.13, standard library only.
 """
@@ -50,12 +52,16 @@ import os
 import shutil
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_BYTES = 1_048_576
 EXPECTED_WIDTH = 1024
 EXPECTED_HEIGHT = 1024
+# 8-byte PNG signature + 4-byte length + 4-byte chunk type +
+# 13-byte IHDR data + 4-byte CRC = 33 bytes.
+IHDR_TOTAL = 33
 
 
 def sha256_of(path: Path) -> str:
@@ -70,17 +76,29 @@ def sha256_of(path: Path) -> str:
 def read_png_size(path: Path) -> tuple[int, int]:
     """Read width and height from a PNG's IHDR chunk.
 
-    Raises ValueError when the file is not a PNG or its header is
-    truncated. Only the first 33 bytes are read, so this is cheap.
+    Also validates the IHDR chunk's CRC: the 4 bytes after the 13 IHDR
+    data bytes must equal CRC32 of the chunk type plus the chunk data.
+
+    Raises ValueError when the file is not a PNG, its header is
+    truncated, or the IHDR CRC does not match. Only the first 33 bytes
+    are read, so this is cheap.
     """
     with path.open("rb") as handle:
-        header = handle.read(33)
-    if len(header) < 33 or header[:8] != PNG_MAGIC:
+        header = handle.read(IHDR_TOTAL)
+    if len(header) < IHDR_TOTAL or header[:8] != PNG_MAGIC:
         raise ValueError(f"{path}: not a PNG file (bad magic bytes)")
     chunk_len, chunk_type = struct.unpack(">I4s", header[8:16])
     if chunk_type != b"IHDR" or chunk_len != 13:
         raise ValueError(f"{path}: first chunk is not a valid IHDR")
-    width, height = struct.unpack(">II", header[16:24])
+    ihdr_data = header[16:29]
+    stored_crc, = struct.unpack(">I", header[29:33])
+    expected_crc = zlib.crc32(chunk_type + ihdr_data) & 0xFFFFFFFF
+    if stored_crc != expected_crc:
+        raise ValueError(
+            f"{path}: IHDR CRC mismatch "
+            f"(stored {stored_crc:#010x}, computed {expected_crc:#010x})"
+        )
+    width, height = struct.unpack(">II", ihdr_data[:8])
     return width, height
 
 
@@ -119,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print progress notes to stderr",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress all output except errors",
+    )
     return parser
 
 
@@ -127,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
 
     source = Path(__file__).resolve().parent / "entry.png"
     try:
-        size, digest = check_entry(source, verbose=args.verbose)
+        size, digest = check_entry(source, verbose=args.verbose and not args.quiet)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -152,11 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    width, height = read_png_size(target)
-    print(f"output: {target}")
-    print(f"bytes: {size}")
-    print(f"dimensions: {width}x{height}")
-    print(f"sha256: {copied_digest}")
+    if not args.quiet:
+        width, height = read_png_size(target)
+        print(f"output: {target}")
+        print(f"bytes: {size}")
+        print(f"dimensions: {width}x{height}")
+        print(f"sha256: {copied_digest}")
     return 0
 
 
